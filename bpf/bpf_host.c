@@ -29,6 +29,8 @@
 #include "lib/common.h"
 #include "lib/config_map.h"
 #include "lib/edt.h"
+#include "lib/traffic_group.h"
+#include "lib/bw_stats.h"
 #include "lib/arp.h"
 #include "lib/ipv6.h"
 #include "lib/ipv4.h"
@@ -1446,11 +1448,49 @@ skip_host_firewall:
 #endif
 
 #if defined(ENABLE_BANDWIDTH_MANAGER)
-	ret = edt_sched_departure(ctx, proto);
-	/* No send_drop_notify_error() here given we're rate-limiting. */
-	if (ret < 0) {
-		update_metrics(ctx_full_len(ctx), METRIC_EGRESS, (__u8)-ret);
-		return CTX_ACT_DROP;
+	{
+		/* 获取 endpoint_id 和 group_id 用于流量组限速 */
+		__u32 endpoint_id = edt_get_aggregate(ctx);
+		__u16 group_id = 0;
+
+		/* 尝试查询流量组 (如果启用) */
+		if (endpoint_id && proto == bpf_htons(ETH_P_IP)) {
+			void *data, *data_end;
+			struct iphdr *ip4;
+
+			if (revalidate_data(ctx, &data, &data_end, &ip4))
+				group_id = lookup_traffic_group4(ip4->daddr);
+		}
+#ifdef ENABLE_IPV6
+		else if (endpoint_id && proto == bpf_htons(ETH_P_IPV6)) {
+			void *data, *data_end;
+			struct ipv6hdr *ip6;
+
+			if (revalidate_data(ctx, &data, &data_end, &ip6)) {
+				union v6addr daddr;
+				ipv6_addr_copy(&daddr, (union v6addr *)&ip6->daddr);
+				group_id = lookup_traffic_group6(&daddr);
+			}
+		}
+#endif /* ENABLE_IPV6 */
+
+		if (group_id) {
+			/* 使用 v2 限速 (按流量组) */
+			ret = edt_sched_departure_v2(ctx, proto, endpoint_id, group_id);
+			/* 更新带宽统计 */
+			if (ret == CTX_ACT_OK)
+				update_bw_stats(endpoint_id, group_id, DIRECTION_EGRESS,
+						ctx_wire_len(ctx));
+		} else {
+			/* 回退到 v1 限速 (整体限速) */
+			ret = edt_sched_departure(ctx, proto);
+		}
+
+		/* No send_drop_notify_error() here given we're rate-limiting. */
+		if (ret < 0) {
+			update_metrics(ctx_full_len(ctx), METRIC_EGRESS, (__u8)-ret);
+			return CTX_ACT_DROP;
+		}
 	}
 #endif
 

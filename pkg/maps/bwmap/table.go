@@ -150,3 +150,144 @@ func (e Edt) TableRow() []string {
 		e.Status.String(),
 	}
 }
+
+// ==================== V2 结构 (支持流量组) ====================
+
+const EdtV2TableName = "bandwidth-edts-v2"
+
+// EdtV2 定义了基于流量组的 EDT 限速配置
+// 用于 cilium_throttle_v2 BPF Map
+type EdtV2 struct {
+	EdtV2IDKey
+
+	// BytesPerSecond 是该端点对该流量组的带宽限制
+	BytesPerSecond uint64
+
+	Prio uint32
+
+	// TimeHorizonDrop 是最大允许的未来发送时间增量（纳秒）
+	TimeHorizonDrop uint64
+
+	// Status 是 BPF Map 同步状态
+	Status reconciler.Status
+}
+
+type EdtV2IDKey struct {
+	EndpointID uint16
+	GroupID    uint16
+	Direction  uint8
+}
+
+func (k EdtV2IDKey) Key() index.Key {
+	key := append(index.Uint16(k.EndpointID), '+')
+	key = append(key, index.Uint16(k.GroupID)...)
+	key = append(key, '+')
+	key = append(key, index.Uint16(uint16(k.Direction))...)
+	return key
+}
+
+var EdtV2IDIndex = statedb.Index[EdtV2, EdtV2IDKey]{
+	Name: "endpoint-group-id",
+	FromObject: func(t EdtV2) index.KeySet {
+		return index.NewKeySet(t.Key())
+	},
+	FromKey: EdtV2IDKey.Key,
+	FromString: func(key string) (index.Key, error) {
+		parts := strings.Split(key, "+")
+		if len(parts) != 3 {
+			return index.Key{}, nil
+		}
+		ep, err := strconv.ParseUint(parts[0], 10, 16)
+		if err != nil {
+			return index.Key{}, err
+		}
+		group, err := strconv.ParseUint(parts[1], 10, 16)
+		if err != nil {
+			return index.Key{}, err
+		}
+		direction, err := strconv.ParseUint(parts[2], 10, 8)
+		if err != nil {
+			return index.Key{}, err
+		}
+		return EdtV2IDKey{
+			EndpointID: uint16(ep),
+			GroupID:    uint16(group),
+			Direction:  uint8(direction),
+		}.Key(), nil
+	},
+	Unique: true,
+}
+
+// NewEdtV2 创建新的流量组限速配置
+func NewEdtV2(endpointID uint16, groupID uint16, direction uint8, bytesPerSecond uint64, prio uint32) EdtV2 {
+	return EdtV2{
+		EdtV2IDKey: EdtV2IDKey{
+			EndpointID: endpointID,
+			GroupID:    groupID,
+			Direction:  direction,
+		},
+		BytesPerSecond:  bytesPerSecond,
+		Prio:            prio,
+		TimeHorizonDrop: uint64(DefaultDropHorizon),
+		Status:          reconciler.StatusPending(),
+	}
+}
+
+// NewEdtV2Table 创建流量组限速 StateDB 表
+func NewEdtV2Table(db *statedb.DB) (statedb.RWTable[EdtV2], error) {
+	return statedb.NewTable(
+		db,
+		EdtV2TableName,
+		EdtV2IDIndex,
+	)
+}
+
+func (e EdtV2) BinaryKey() encoding.BinaryMarshaler {
+	k := EdtIdV2{
+		EndpointID: uint32(e.EndpointID),
+		GroupID:    e.GroupID,
+		Direction:  e.Direction,
+	}
+	return bpf.StructBinaryMarshaler{Target: &k}
+}
+
+func (e EdtV2) BinaryValue() encoding.BinaryMarshaler {
+	v := EdtInfo{
+		Bps:      e.BytesPerSecond,
+		TimeLast: 0,
+	}
+	if e.Direction == 0 {
+		// egress
+		v.TimeHorizonDropOrTokens = e.TimeHorizonDrop
+		v.Prio = e.Prio
+	} else {
+		// ingress - use tokens field
+		v.TimeHorizonDropOrTokens = 0
+	}
+	return bpf.StructBinaryMarshaler{Target: &v}
+}
+
+func (e EdtV2) TableHeader() []string {
+	return []string{
+		"EndpointID",
+		"GroupID",
+		"Direction",
+		"BitsPerSecond",
+		"Status",
+	}
+}
+
+func (e EdtV2) TableRow() []string {
+	quantity := resource.NewQuantity(int64(e.BytesPerSecond*8), resource.DecimalSI)
+	dir := "egress"
+	if e.Direction == 1 {
+		dir = "ingress"
+	}
+	return []string{
+		strconv.FormatUint(uint64(e.EndpointID), 10),
+		strconv.FormatUint(uint64(e.GroupID), 10),
+		dir,
+		quantity.String(),
+		e.Status.String(),
+	}
+}

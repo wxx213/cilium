@@ -17,6 +17,14 @@ struct edt_id {
 	__u8		pad[3];
 };
 
+/* 扩展版 EDT ID，支持流量组 */
+struct edt_id_v2 {
+	__u32		endpoint_id;
+	__u16		group_id;      /* 流量组 ID */
+	__u8		direction;     /* DIRECTION_EGRESS / DIRECTION_INGRESS */
+	__u8		pad;
+};
+
 struct edt_info {
 	__u64		bps;
 	__u64		t_last;
@@ -37,6 +45,16 @@ struct {
 	__uint(max_entries, THROTTLE_MAP_SIZE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } cilium_throttle __section_maps_btf;
+
+/* 扩展版限速 Map，支持按流量组限速 */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, struct edt_id_v2);
+	__type(value, struct edt_info);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(max_entries, THROTTLE_MAP_SIZE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} cilium_throttle_v2 __section_maps_btf;
 
 /* From XDP layer, we neither go through an egress hook nor qdisc
  * from here, hence nothing to be set.
@@ -113,10 +131,88 @@ out:
 		ctx->priority = info->prio - 1;
 	return CTX_ACT_OK;
 }
+
+/* V2 版本：支持按流量组限速
+ * 
+ * @param ctx: 数据包上下文
+ * @param proto: 协议类型
+ * @param endpoint_id: Endpoint ID
+ * @param group_id: 流量组 ID
+ * @return: CTX_ACT_OK 或 DROP_EDT_HORIZON
+ */
+static __always_inline int
+edt_sched_departure_v2(struct __ctx_buff *ctx, __be16 proto,
+		       __u32 endpoint_id, __u16 group_id)
+{
+	__u64 delay, now, t, t_next;
+	struct edt_id_v2 key = {
+		.endpoint_id = endpoint_id,
+		.group_id = group_id,
+		.direction = DIRECTION_EGRESS,
+	};
+	struct edt_info *info;
+
+	if (!eth_is_supported_ethertype(proto))
+		return CTX_ACT_OK;
+	if (proto != bpf_htons(ETH_P_IP) &&
+	    proto != bpf_htons(ETH_P_IPV6))
+		return CTX_ACT_OK;
+
+	if (!endpoint_id)
+		return CTX_ACT_OK;
+
+	info = map_lookup_elem(&cilium_throttle_v2, &key);
+	if (!info)
+		return CTX_ACT_OK;
+	if (!info->bps)
+		goto out;
+
+	now = ktime_get_ns();
+	t = ctx->tstamp;
+	if (t < now)
+		t = now;
+	delay = ((__u64)ctx_wire_len(ctx)) * NSEC_PER_SEC / info->bps;
+	t_next = READ_ONCE(info->t_last) + delay;
+	if (t_next <= t) {
+		WRITE_ONCE(info->t_last, t);
+		return CTX_ACT_OK;
+	}
+	if (t_next - now >= info->t_horizon_drop)
+		return DROP_EDT_HORIZON;
+	WRITE_ONCE(info->t_last, t_next);
+	ctx->tstamp = t_next;
+out:
+	if (info->prio)
+		ctx->priority = info->prio - 1;
+	return CTX_ACT_OK;
+}
 #else
 static __always_inline void
 edt_set_aggregate(struct __ctx_buff *ctx __maybe_unused,
 		  __u32 aggregate __maybe_unused)
 {
 }
+
+static __always_inline __u32
+edt_get_aggregate(struct __ctx_buff *ctx __maybe_unused)
+{
+	return 0;
+}
+
+static __always_inline int
+edt_sched_departure(struct __ctx_buff *ctx __maybe_unused,
+		    __be16 proto __maybe_unused)
+{
+	return CTX_ACT_OK;
+}
+
+static __always_inline int
+edt_sched_departure_v2(struct __ctx_buff *ctx __maybe_unused,
+		       __be16 proto __maybe_unused,
+		       __u32 endpoint_id __maybe_unused,
+		       __u16 group_id __maybe_unused)
+{
+	return CTX_ACT_OK;
+}
 #endif /* ENABLE_BANDWIDTH_MANAGER */
+

@@ -100,6 +100,11 @@ const (
 	CGCCListName       = "ciliumgatewayclassconfiglists"
 	CGCCKindDefinition = "CiliumGatewayClassConfig"
 	CGCCName           = CGCCPluralName + "." + CustomResourceDefinitionGroup
+
+	// CiliumTrafficGroup (CTG) - 流量分组，用于 CIDR 限速
+	CTGPluralName     = "ciliumtrafficgroups"
+	CTGKindDefinition = "CiliumTrafficGroup"
+	CTGName           = CTGPluralName + "." + CustomResourceDefinitionGroup
 )
 
 // SchemeGroupVersion is group version used to register these objects
@@ -169,6 +174,10 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		// new Gateway API types
 		&CiliumGatewayClassConfig{},
 		&CiliumGatewayClassConfigList{},
+
+		// Traffic Group for CIDR-based bandwidth limiting
+		&CiliumTrafficGroup{},
+		&CiliumTrafficGroupList{},
 	)
 
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)

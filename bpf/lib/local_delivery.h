@@ -8,6 +8,7 @@
 #include "dbg.h"
 #include "eps.h"
 #include "l3.h"
+#include "traffic_group.h"
 #include "token_bucket.h"
 
 DECLARE_CONFIG(bool, enable_netkit, "Use netkit devices for pods")
@@ -135,8 +136,20 @@ local_delivery(struct __ctx_buff *ctx, __u32 seclabel, __u32 magic,
 		 * Traffic from nodes, local endpoints, or hairpin connections is ignored
 		 */
 		int ret;
+		__u16 group_id = 0;
 
-		ret = accept(ctx, ep->lxc_id);
+		/* 尝试从源 IP 查询流量组 (用于入流量限速) */
+		void *data, *data_end;
+		struct iphdr *ip4;
+
+		if (revalidate_data(ctx, &data, &data_end, &ip4))
+			group_id = lookup_traffic_group4(ip4->saddr);
+
+		if (group_id)
+			ret = accept_v2(ctx, ep->lxc_id, group_id);
+		else
+			ret = accept(ctx, ep->lxc_id);
+
 		if (IS_ERR(ret))
 			return ret;
 	}

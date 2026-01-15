@@ -35,6 +35,8 @@ type Interface interface {
 	CiliumNodeConfigs() CiliumNodeConfigInformer
 	// CiliumPodIPPools returns a CiliumPodIPPoolInformer.
 	CiliumPodIPPools() CiliumPodIPPoolInformer
+	// CiliumTrafficGroups returns a CiliumTrafficGroupInformer.
+	CiliumTrafficGroups() CiliumTrafficGroupInformer
 }
 
 type version struct {
@@ -106,4 +108,9 @@ func (v *version) CiliumNodeConfigs() CiliumNodeConfigInformer {
 // CiliumPodIPPools returns a CiliumPodIPPoolInformer.
 func (v *version) CiliumPodIPPools() CiliumPodIPPoolInformer {
 	return &ciliumPodIPPoolInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
+// CiliumTrafficGroups returns a CiliumTrafficGroupInformer.
+func (v *version) CiliumTrafficGroups() CiliumTrafficGroupInformer {
+	return &ciliumTrafficGroupInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }
